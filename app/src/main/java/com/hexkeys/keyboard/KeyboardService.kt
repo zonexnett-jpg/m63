@@ -51,6 +51,28 @@ class KeyboardService : InputMethodService(), KeyboardListener {
         return s.substring(s.length - n)
     }
 
+    override fun onMoveCursor(delta: Int) {
+        sendDownUpKeyEvents(
+            if (delta < 0) KeyEvent.KEYCODE_DPAD_LEFT else KeyEvent.KEYCODE_DPAD_RIGHT
+        )
+    }
+
+    /** Deletes the word before the cursor (plus any spaces right before the cursor). */
+    override fun onDeleteWord() {
+        val ic = currentInputConnection ?: return
+        val selected = ic.getSelectedText(0)
+        if (!selected.isNullOrEmpty()) {
+            ic.commitText("", 1)
+            return
+        }
+        val before = ic.getTextBeforeCursor(64, 0)?.toString() ?: return
+        var i = before.length
+        while (i > 0 && before[i - 1].isWhitespace()) i--
+        while (i > 0 && !before[i - 1].isWhitespace()) i--
+        val n = before.length - i
+        if (n > 0) ic.deleteSurroundingText(n, 0)
+    }
+
     override fun onRestore(text: String) {
         if (text.isNotEmpty()) currentInputConnection?.commitText(text, 1)
     }

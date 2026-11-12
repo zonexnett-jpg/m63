@@ -62,7 +62,7 @@ object Layouts {
         hold = listOf("!", "?", "'", "\"", "¿", "¡"), holdStart = 1, hint = "'"
     )
 
-    private fun space(x: Float) = Key(Kind.SPACE, x, 2)
+    private fun space(x: Float) = Key(Kind.SPACE, x, 2, up = "'")
 
     private fun fill(chars: String, row: Int, long: Boolean): List<Key> =
         chars.split(" ").mapIndexed { i, c ->
@@ -82,8 +82,8 @@ object Layouts {
         addAll(fill("x c v b", 4, false))
         add(Key(Kind.TOGGLE, xShort(4), 4, main = "123"))
         add(Key(Kind.ENTER, xShort(5), 4))
-        add(Key(Kind.SHIFT, 0.35f, 2))
-        add(Key(Kind.BACKSPACE, 6.82f, 2))
+        add(Key(Kind.SHIFT, 0.34f, 2))
+        add(Key(Kind.BACKSPACE, 6.86f, 2))
     }
 
     val symbols: List<Key> = buildList {
@@ -108,7 +108,7 @@ object Layouts {
         add(sym(">", xShort(3), 4, "}"))
         add(Key(Kind.TOGGLE, xShort(4), 4, main = "ABC"))
         add(Key(Kind.ENTER, xShort(5), 4))
-        add(Key(Kind.BACKSPACE, 6.82f, 2))
+        add(Key(Kind.BACKSPACE, 6.86f, 2))
     }
 
     // ------------------------------------------------------------ Arabic
@@ -143,13 +143,17 @@ object Layouts {
             acc.take(k) + c + acc.drop(k), k, showUp = true)
     }
 
+    /** Distance to the nearest resting point of either thumb (low on each side). */
+    private fun thumbDistance(x: Float, row: Int): Float {
+        val dy = (row - 2.6f) * 0.866f
+        val left = (x - 2.1f) * (x - 2.1f)
+        val right = (x - 5.1f) * (x - 5.1f)
+        return minOf(left, right) + dy * dy * 1.3f
+    }
+
     val arabic: List<Key> = run {
         val slots = letters.filter { it.kind == Kind.CHAR || it.kind == Kind.PUNCT }
-            .sortedBy {
-                val dx = it.x - 3.6f
-                val dy = it.row * 0.866f - 1.732f
-                dx * dx + dy * dy
-            }
+            .sortedBy { thumbDistance(it.x, it.row) }
         letters.filter { it.kind != Kind.SHIFT }.map { key ->
             when (key.kind) {
                 Kind.CHAR, Kind.PUNCT -> arabicKey(arabicOrder[slots.indexOf(key)], key)

@@ -27,9 +27,11 @@ interface KeyboardListener {
     fun onDeleteOne(): String?
     fun onRestore(text: String)
     fun onEnter()
+    fun onMoveCursor(delta: Int)
+    fun onDeleteWord()
 }
 
-private enum class Mode { NONE, DELETE, HOLD, REPEAT }
+private enum class Mode { NONE, DELETE, HOLD, REPEAT, LIFT, ROUND, CURSOR }
 
 private enum class ShiftState { OFF, ONCE, LOCK }
 
@@ -40,6 +42,19 @@ class HexKeyboardView(context: Context) : View(context) {
     var listener: KeyboardListener? = null
 
     private val prefs = context.getSharedPreferences("hexkeys", Context.MODE_PRIVATE)
+
+    init {
+        // layout v2: new thumb-based Arabic order, so drop any older saved key order
+        if (prefs.getInt("layout_v", 0) != 2) {
+            prefs.edit().remove("perm_letters").remove("perm_arabic").remove("perm_symbols")
+                .putInt("layout_v", 2).apply()
+        }
+    }
+
+    private val density = context.resources.displayMetrics.density
+    private val maxLiftPx = 190f * density
+    private var corner = prefs.getFloat("corner", 0.22f)
+    private var liftPx = prefs.getFloat("lift_dp", 0f) * density
     private var arabic = prefs.getBoolean("arabic", false)
     private var symbols = false
     private var shift = ShiftState.OFF
@@ -102,6 +117,7 @@ class HexKeyboardView(context: Context) : View(context) {
         strokeJoin = Paint.Join.ROUND
     }
     private val path = Path()
+    private val rounded = Path()
     private val rect = RectF()
 
     // ---- touch state
@@ -117,6 +133,10 @@ class HexKeyboardView(context: Context) : View(context) {
     private var lastX = 0f
     private var deleteCount = 0
     private var repeatCount = 0
+    private var dragRefX = 0f
+    private var dragRefY = 0f
+    private var dragBaseLift = 0f
+    private var dragBaseCorner = 0f
     private val handler = Handler(Looper.getMainLooper())
     private val longPress = Runnable { startHold() }
     private val repeat = object : Runnable {
@@ -135,9 +155,19 @@ class HexKeyboardView(context: Context) : View(context) {
         editMode = false
         editFirst = null
         arabic = prefs.getBoolean("arabic", false)
+        corner = prefs.getFloat("corner", 0.22f)
+        liftPx = (prefs.getFloat("lift_dp", 0f) * density).coerceIn(0f, maxLiftPx)
+        applyCorner()
         perms.clear()
         built.clear()
+        requestLayout()
         invalidate()
+    }
+
+    /** corner: 0 = sharp, 1 = very round (key size is unchanged). */
+    private fun applyCorner() {
+        val rc = corner * 0.8f * r
+        keyPaint.pathEffect = if (rc < 1f) null else CornerPathEffect(rc)
     }
 
     override fun onMeasure(widthSpec: Int, heightSpec: Int) {
@@ -148,7 +178,8 @@ class HexKeyboardView(context: Context) : View(context) {
         offX = (width - 7.2f * w) / 2f
         r = w / sqrt(3f)
         padTop = 0.25f * r
-        setMeasuredDimension(width, (padTop * 2 + 8f * r).toInt())
+        applyCorner()
+        setMeasuredDimension(width, (padTop * 2 + 8f * r + liftPx).toInt())
     }
 
     override fun onDetachedFromWindow() {
@@ -209,18 +240,21 @@ class HexKeyboardView(context: Context) : View(context) {
         }
         c.drawPath(path, keyPaint)
 
-        if (k.kind == Kind.PUNCT || k.kind == Kind.TOGGLE) {
+        if (k.kind == Kind.PUNCT || k.kind == Kind.TOGGLE || (k.kind == Kind.CHAR && k.showUp)) {
+            keyPaint.getFillPath(path, rounded)
             c.save()
-            c.clipPath(path)
+            c.clipPath(rounded)
             flat.color = bandColor(dark)
             c.drawRect(cx - r, cy + 0.05f * r, cx + r, cy + r, flat)
             c.restore()
         }
 
         when (k.kind) {
-            Kind.CHAR -> {
+            Kind.CHAR -> if (k.showUp) {
+                label(c, k.up ?: "", cx, cy - 0.3f * r, 0.3f * w, textColor(dark))
+                label(c, k.main, cx, cy + 0.45f * r, 0.32f * w, textColor(dark))
+            } else {
                 label(c, applyShift(k.main), cx, cy, 0.42f * w, textColor(dark))
-                if (k.showUp) label(c, k.up ?: "", cx + 0.5f * r, cy - 0.5f * r, 0.2f * w, dimColor(dark))
             }
             Kind.PUNCT -> {
                 label(c, k.up ?: "", cx, cy - 0.3f * r, 0.3f * w, textColor(dark))
@@ -240,10 +274,10 @@ class HexKeyboardView(context: Context) : View(context) {
     private fun drawSide(c: Canvas, k: Key, dark: Boolean) {
         val cx = cxOf(k)
         val cy = centerY(k)
-        val s = 0.3f * w
+        val s = 0.2f * w
         val col = if (editMode) dimColor(dark) else textColor(dark)
         stroke.color = col
-        stroke.strokeWidth = s * 0.16f
+        stroke.strokeWidth = s * 0.2f
         flat.color = col
         path.reset()
         if (k.kind == Kind.SHIFT) {
@@ -387,15 +421,33 @@ class HexKeyboardView(context: Context) : View(context) {
                         Mode.NONE -> {
                             val dx = x - downX
                             val dy = y - downY
-                            if (!editMode && dx < -0.35f * w && abs(dx) > abs(dy)) {
+                            val moved = abs(dx) > 0.3f * w || abs(dy) > 0.3f * w
+                            if (editMode) {
+                                // edit mode: drag up/down = raise keyboard, drag left/right = corner roundness
+                                if (moved) {
+                                    handler.removeCallbacks(longPress)
+                                    mode = if (abs(dy) > abs(dx)) Mode.LIFT else Mode.ROUND
+                                    dragRefX = x
+                                    dragRefY = e.rawY
+                                    dragBaseLift = liftPx
+                                    dragBaseCorner = corner
+                                    pressedKey = null
+                                    invalidate()
+                                }
+                            } else if (downKey?.kind == Kind.SPACE && abs(dx) > 0.35f * w && abs(dx) > abs(dy)) {
+                                startCursor(x, dx)
+                            } else if (dx < -0.35f * w && abs(dx) > abs(dy)) {
                                 startDelete(x)
-                            } else if (abs(dx) > 0.3f * w || abs(dy) > 0.3f * w) {
+                            } else if (moved) {
                                 handler.removeCallbacks(longPress)
                             }
                         }
                         Mode.DELETE -> updateDelete(x)
                         Mode.HOLD -> updateHold(x)
                         Mode.REPEAT -> Unit
+                        Mode.LIFT -> updateLift(e.rawY)
+                        Mode.ROUND -> updateCorner(x)
+                        Mode.CURSOR -> updateCursor(x)
                     }
                 }
             }
@@ -411,7 +463,9 @@ class HexKeyboardView(context: Context) : View(context) {
                                 commit(it.key.hold[it.selected])
                                 tick()
                             }
-                            Mode.DELETE, Mode.REPEAT -> Unit
+                            Mode.DELETE, Mode.REPEAT, Mode.CURSOR -> Unit
+                            Mode.LIFT -> prefs.edit().putFloat("lift_dp", liftPx / density).apply()
+                            Mode.ROUND -> prefs.edit().putFloat("corner", corner).apply()
                             Mode.NONE -> release(e.getX(idx), e.getY(idx))
                         }
                     }
@@ -465,6 +519,11 @@ class HexKeyboardView(context: Context) : View(context) {
         } else if (up != null && swipeUp) {
             commit(up)
             tick()
+        } else if (k.kind == Kind.SPACE && dy > 0.35f * w && abs(dy) > abs(dx)) {
+            listener?.onDeleteWord()
+            tick()
+        } else if (k.kind == Kind.SPACE && (abs(dx) > 0.35f * w || abs(dy) > 0.35f * w)) {
+            // a drag on the space key never types a space
         } else {
             activate(k)
         }
@@ -527,6 +586,48 @@ class HexKeyboardView(context: Context) : View(context) {
         p[j] = t
         built.remove(id)
         prefs.edit().putString("perm_$id", p.joinToString(",")).apply()
+    }
+
+    // ---- edit-mode drags
+
+    private fun updateLift(rawY: Float) {
+        val v = (dragBaseLift + (dragRefY - rawY)).coerceIn(0f, maxLiftPx)
+        if (v != liftPx) {
+            liftPx = v
+            requestLayout()
+        }
+    }
+
+    private fun updateCorner(x: Float) {
+        corner = (dragBaseCorner + (x - dragRefX) / (w * 4f)).coerceIn(0f, 1f)
+        applyCorner()
+        invalidate()
+    }
+
+    // ---- space-key drag: move the cursor (no deleting)
+
+    private fun startCursor(x: Float, dx: Float) {
+        handler.removeCallbacks(longPress)
+        mode = Mode.CURSOR
+        pressedKey = null
+        lastX = x
+        listener?.onMoveCursor(if (dx < 0) -1 else 1)
+        performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK)
+        invalidate()
+    }
+
+    private fun updateCursor(x: Float) {
+        val s = 0.3f * w
+        while (x < lastX - s) {
+            lastX -= s
+            listener?.onMoveCursor(-1)
+            performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK)
+        }
+        while (x > lastX + s) {
+            lastX += s
+            listener?.onMoveCursor(1)
+            performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK)
+        }
     }
 
     // ---- swipe-left delete (with restore when swiping back right)
